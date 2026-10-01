@@ -1,0 +1,21 @@
+.{
+    .name = .microinvKSEF,
+    .version = "0.0.0",
+    .fingerprint = 0x61e38740c0ac8344,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .xml = .{
+            .url = "git+https://github.com/ianprime0509/zig-xml#d73304c3d56d6331a0caca4d339607e7c740aab5",
+            .hash = "xml-0.2.0-ZTbP35V4AgA_pFiWGWiBILJK7ifCCvj7mbiGfyMcEi2K",
+        },
+        .dvui = .{
+            .url = "git+https://github.com/david-vanderson/dvui?ref=main#e5f99361b83a1d1f1e1489cd4b24f6184db984f9",
+            .hash = "dvui-0.5.0-dev-AQFJmajqAwEfc8iD1xQ9oXpob4-xRB_IBT4f5V1ALK9M",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
