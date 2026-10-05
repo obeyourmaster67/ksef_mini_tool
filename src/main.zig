@@ -22,6 +22,7 @@ pub const main = dvui.App.main;
 pub const panic = dvui.App.panic;
 pub const std_options: std.Options = .{
     .logFn = dvui.App.logFn,
+    .log_level = if (builtin.mode == .Debug) .debug else .err,
 };
 
 pub fn appInit(win: *dvui.Window) !void {
@@ -171,7 +172,7 @@ fn inventory(dir: []const u8) !void {
         const stdout = &stdout_writer.interface;
 
         var p7_occured = false;
-        var p11_occured = false;
+        var p9a_occured = false;
         var p8b_occured = false;
         var item: Item = Item{
             .name = null,
@@ -191,8 +192,8 @@ fn inventory(dir: []const u8) !void {
             switch (node) {
                 .eof => break,
                 .element_start => {
-                    if (std.mem.eql(u8, "P_11", reader.elementName())) {
-                        p11_occured = true;
+                    if (std.mem.eql(u8, "P_9A", reader.elementName())) {
+                        p9a_occured = true;
                     } else if (std.mem.eql(u8, "P_8B", reader.elementName())) {
                         p8b_occured = true;
                     } else if (std.mem.eql(u8, "P_7", reader.elementName())) {
@@ -200,11 +201,11 @@ fn inventory(dir: []const u8) !void {
                     }
                 },
                 .text => {
-                    if (p11_occured) {
+                    if (p9a_occured) {
                         item.price = std.fmt.parseFloat(f32, try reader.text()) catch 0.0;
-                        p11_occured = false;
+                        p9a_occured = false;
                     } else if (p8b_occured) {
-                        item.quantity = std.fmt.parseInt(u32, try reader.text(), 10) catch 0.0;
+                        item.quantity = @intFromFloat(std.fmt.parseFloat(f32, try reader.text()) catch 0.0);
                         p8b_occured = false;
                     } else if (p7_occured) {
                         const text = try reader.text();
