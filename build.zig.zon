@@ -1,7 +1,7 @@
 .{
-    .name = .microinvKSEF,
+    .name = .ksef_mini_tool,
     .version = "0.0.0",
-    .fingerprint = 0x61e38740c0ac8344,
+    .fingerprint = 0x78e14a71a91c99b8,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .xml = .{
