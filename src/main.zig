@@ -22,7 +22,6 @@ pub const main = dvui.App.main;
 pub const panic = dvui.App.panic;
 pub const std_options: std.Options = .{
     .logFn = dvui.App.logFn,
-    .log_level = if (builtin.mode == .Debug) .debug else .err,
 };
 
 pub fn appInit(win: *dvui.Window) !void {
@@ -32,7 +31,6 @@ pub fn appInit(win: *dvui.Window) !void {
 pub fn appDeinit(win: *dvui.Window) void {
     _ = win;
     thread.join();
-    inventory_list.deinit(allocator);
 }
 
 const AppState = enum(u8) {
@@ -41,12 +39,18 @@ const AppState = enum(u8) {
     inventorying,
     saving,
     finishing,
+    err,
 };
 
 const Item = struct {
-    name: ?[4096]u8,
-    quantity: ?u32,
-    price: ?f32,
+    name: std.ArrayList(u8) = .empty,
+    quantity: ?u32 = null,
+    unit: ?[16]u8 = null,
+    price: ?f32 = null,
+
+    fn deinit(self: *Item, gpa: std.mem.Allocator) void {
+        self.name.deinit(gpa);
+    }
 };
 
 var allocator = std.heap.smp_allocator;
@@ -56,6 +60,7 @@ var state: AppState = .awaiting_read_path;
 var has_select_dialog_showed: bool = false;
 var inventory_list: std.ArrayList(Item) = .empty;
 var filepath: []u8 = undefined;
+var err: anyerror = error.Undefined;
 
 pub fn appFrame() !dvui.App.Result {
     {
@@ -66,7 +71,10 @@ pub fn appFrame() !dvui.App.Result {
         );
         scaler.deinit();
 
-        frame() catch |e| err(e);
+        frame() catch |e| {
+            err = e;
+            state = .err;
+        };
     }
 
     return .ok;
@@ -118,8 +126,12 @@ fn frame() !void {
         .inventorying => {
             dvui.spinner(@src(), .{});
 
-            if (is_done.load(.acquire))
-                state = .awaiting_write_path;
+            if (is_done.load(.acquire)) {
+                state = if (inventory_list.items.len == 0)
+                    .awaiting_read_path
+                else
+                    .awaiting_write_path;
+            }
         },
         .saving => {
             dvui.spinner(@src(), .{});
@@ -129,14 +141,26 @@ fn frame() !void {
         },
         .finishing => {
             dvui.label(@src(), "Zapisano", .{}, .{});
-            if (dvui.button(@src(), "OK", .{}, .{}))
+            if (dvui.button(@src(), "OK", .{}, .{})) {
+                for (inventory_list.items) |*it| it.name.deinit(allocator);
+                inventory_list.deinit(allocator);
                 state = .awaiting_read_path;
+            }
+        },
+        .err => {
+            dvui.label(@src(), "Błąd", .{}, .{});
+            dvui.label(@src(), "Uruchom ponownie plikacje\n({s})\n", .{@errorName(err)}, .{});
+            if (dvui.button(@src(), "OK", .{}, .{}))
+                std.process.exit(1);
         },
     }
 }
 
 fn inventory_job(dir: []const u8) void {
-    inventory(dir) catch |e| err(e);
+    inventory(dir) catch |e| {
+        err = e;
+        state = .err;
+    };
 }
 
 fn inventory(dir: []const u8) !void {
@@ -151,7 +175,12 @@ fn inventory(dir: []const u8) !void {
     defer target_dir.close(dvui.io);
     var iterator = target_dir.iterate();
 
+    var item: Item = .{};
+
     while (try iterator.next(dvui.io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".xml"))
+            continue;
+
         const path = try std.Io.Dir.path.join(allocator, &.{ dir, entry.name });
         defer allocator.free(path);
 
@@ -170,67 +199,64 @@ fn inventory(dir: []const u8) !void {
         var stdout_buf: [4096]u8 = undefined;
         var stdout_writer = std.Io.File.stdout().writer(dvui.io, &stdout_buf);
         const stdout = &stdout_writer.interface;
-
-        var p7_occured = false;
-        var p9a_occured = false;
-        var p8b_occured = false;
-        var item: Item = Item{
-            .name = null,
-            .quantity = null,
-            .price = null,
-        };
+        try stdout.flush();
 
         while (true) {
-            const node = reader.read() catch |e| {
-                try stdout.flush();
-                if (e == error.OutOfMemory) {
-                    return e;
-                } else {
-                    break;
-                }
-            };
-            switch (node) {
+            switch (try reader.read()) {
                 .eof => break,
                 .element_start => {
-                    if (std.mem.eql(u8, "P_9A", reader.elementName())) {
-                        p9a_occured = true;
-                    } else if (std.mem.eql(u8, "P_8B", reader.elementName())) {
-                        p8b_occured = true;
-                    } else if (std.mem.eql(u8, "P_7", reader.elementName())) {
-                        p7_occured = true;
+                    if (std.mem.eql(u8, "P_7", reader.elementNameNs().local)) {
+                        const text = try switch (try reader.read()) {
+                            .text => try reader.text(),
+                            .element_end => "",
+                            else => error.MalformedXml,
+                        };
+
+                        item.name.clearRetainingCapacity();
+                        try item.name.appendSlice(allocator, text);
+                    } else if (std.mem.eql(u8, "P_8B", reader.elementNameNs().local)) {
+                        _ = try reader.read();
+                        item.quantity = @intFromFloat(std.fmt.parseFloat(f32, try reader.text()) catch 0.0);
+                    } else if (std.mem.eql(u8, "P_8A", reader.elementNameNs().local)) {
+                        const text = try switch (try reader.read()) {
+                            .text => try reader.text(),
+                            .element_end => "",
+                            else => error.MalformedXml,
+                        };
+                        item.unit = @splat(0);
+                        const len = @min(text.len, item.unit.?.len);
+                        @memcpy(item.unit.?[0..len], text[0..len]);
+                    } else if (std.mem.eql(u8, "P_9A", reader.elementNameNs().local)) {
+                        _ = try reader.read();
+                        item.price = std.fmt.parseFloat(f32, try reader.text()) catch 0.0;
                     }
                 },
-                .text => {
-                    if (p9a_occured) {
-                        item.price = std.fmt.parseFloat(f32, try reader.text()) catch 0.0;
-                        p9a_occured = false;
-                    } else if (p8b_occured) {
-                        item.quantity = @intFromFloat(std.fmt.parseFloat(f32, try reader.text()) catch 0.0);
-                        p8b_occured = false;
-                    } else if (p7_occured) {
-                        const text = try reader.text();
-                        item.name = undefined;
-                        @memset(&item.name.?, 0);
-                        @memcpy(item.name.?[0..text.len], text);
-                        p7_occured = false;
-                    }
-                    if (item.name != null and item.price != null and item.quantity != null) {
-                        try inventory_list.append(allocator, item);
-                        item = Item{ .name = null, .quantity = null, .price = null };
+                .element_end => {
+                    if (std.mem.eql(u8, reader.elementNameNs().local, "FaWiersz")) {
+                        if (item.name.items.len != 0 and item.quantity != null and item.price != null) {
+                            try inventory_list.append(allocator, item);
+                            item = .{};
+                        } else {
+                            item.name.clearRetainingCapacity();
+                            item.quantity = null;
+                            item.unit = null;
+                            item.price = null;
+                        }
                     }
                 },
                 else => {},
             }
         }
-
-        try stdout.flush();
     }
 
     is_done.store(true, .release);
 }
 
 fn save_inventory_job(path: []const u8) void {
-    save_inventory(path) catch |e| err(e);
+    save_inventory(path) catch |e| {
+        err = e;
+        state = .err;
+    };
 }
 
 fn save_inventory(path: []const u8) !void {
@@ -260,29 +286,22 @@ fn save_inventory(path: []const u8) !void {
 
     for (inventory_list.items) |*item| {
         try w.writeByte('"');
-        try w.writeAll(std.mem.sliceTo(&item.name.?, 0));
+        try w.writeAll(item.name.items);
         try w.writeByte('"');
         try w.writeByte(',');
 
         var num_buf: [64]u8 = undefined;
-        try w.writeAll(try std.fmt.bufPrint(&num_buf, "{}", .{item.quantity.?}));
+
+        try w.writeAll(try std.fmt.bufPrint(&num_buf, "{}", .{item.quantity orelse 0}));
         try w.writeByte(',');
-        try w.writeAll(try std.fmt.bufPrint(&num_buf, "{d:.2}", .{item.price.?}));
+
+        try w.writeAll(&item.unit.?);
+        try w.writeByte(',');
+
+        try w.writeAll(try std.fmt.bufPrint(&num_buf, "{d:.2}", .{item.price orelse 0.0}));
         try w.writeByte('\n');
     }
 
     try w.flush();
     is_done.store(true, .release);
-}
-
-fn err(e: anyerror) void {
-    var win = dvui.floatingWindow(@src(), .{ .modal = true }, .{});
-    defer win.deinit();
-
-    _ = dvui.windowHeader("Błąd", "", null);
-    dvui.label(@src(), "Uruchom ponownie plikacje\n{s}", .{@errorName(e)}, .{});
-
-    if (dvui.button(@src(), "OK", .{}, .{})) {
-        std.process.exit(1);
-    }
 }
