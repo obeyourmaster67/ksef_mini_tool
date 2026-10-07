@@ -30,7 +30,8 @@ pub fn appInit(win: *dvui.Window) !void {
 
 pub fn appDeinit(win: *dvui.Window) void {
     _ = win;
-    thread.join();
+    if (is_debug)
+        _ = debug_allocator.deinit();
 }
 
 const AppState = enum(u8) {
@@ -53,13 +54,22 @@ const Item = struct {
     }
 };
 
-var allocator = std.heap.smp_allocator;
+const is_debug = switch (builtin.mode) {
+    .Debug, .ReleaseSafe => true,
+    .ReleaseFast, .ReleaseSmall => false,
+};
+
+var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+const allocator: std.mem.Allocator = if (is_debug)
+    debug_allocator.allocator()
+else
+    std.heap.smp_allocator;
 var thread: std.Thread = undefined;
 var is_done: std.atomic.Value(bool) = .init(false);
 var state: AppState = .awaiting_read_path;
 var has_select_dialog_showed: bool = false;
-var inventory_list: std.ArrayList(Item) = .empty;
-var filepath: []u8 = undefined;
+var items: std.ArrayList(Item) = .empty;
+var skipped_files: std.ArrayList([]const u8) = .empty;
 var err: anyerror = error.Undefined;
 
 pub fn appFrame() !dvui.App.Result {
@@ -127,7 +137,7 @@ fn frame() !void {
             dvui.spinner(@src(), .{});
 
             if (is_done.load(.acquire)) {
-                state = if (inventory_list.items.len == 0)
+                state = if (items.items.len == 0)
                     .awaiting_read_path
                 else
                     .awaiting_write_path;
@@ -141,9 +151,24 @@ fn frame() !void {
         },
         .finishing => {
             dvui.label(@src(), "Zapisano", .{}, .{});
+
+            {
+                var scroll = dvui.scrollArea(@src(), .{}, .{
+                    .expand = .horizontal,
+                    .background = false,
+                    .max_size_content = .{ .w = 10000, .h = 200 },
+                });
+                defer scroll.deinit();
+                for (skipped_files.items, 0..) |item, i| {
+                    dvui.label(@src(), "{s}", .{item}, .{ .id_extra = i });
+                }
+            }
+
             if (dvui.button(@src(), "OK", .{}, .{})) {
-                for (inventory_list.items) |*it| it.name.deinit(allocator);
-                inventory_list.deinit(allocator);
+                for (items.items) |*it| it.name.deinit(allocator);
+                items.deinit(allocator);
+                for (skipped_files.items) |it| allocator.free(it);
+                skipped_files.deinit(allocator);
                 state = .awaiting_read_path;
             }
         },
@@ -175,8 +200,6 @@ fn inventory(dir: []const u8) !void {
     defer target_dir.close(dvui.io);
     var iterator = target_dir.iterate();
 
-    var item: Item = .{};
-
     while (try iterator.next(dvui.io)) |entry| {
         if (!std.mem.endsWith(u8, entry.name, ".xml"))
             continue;
@@ -201,6 +224,9 @@ fn inventory(dir: []const u8) !void {
         const stdout = &stdout_writer.interface;
         try stdout.flush();
 
+        var item: Item = .{};
+        var net_from_gross_price: f32 = 0.0;
+
         while (true) {
             switch (try reader.read()) {
                 .eof => break,
@@ -223,24 +249,44 @@ fn inventory(dir: []const u8) !void {
                             .element_end => "",
                             else => error.MalformedXml,
                         };
+
                         item.unit = @splat(0);
                         const len = @min(text.len, item.unit.?.len);
                         @memcpy(item.unit.?[0..len], text[0..len]);
                     } else if (std.mem.eql(u8, "P_9A", reader.elementNameNs().local)) {
                         _ = try reader.read();
                         item.price = std.fmt.parseFloat(f32, try reader.text()) catch 0.0;
+                    } else if (std.mem.eql(u8, "P_9B", reader.elementNameNs().local)) {
+                        _ = try reader.read();
+
+                        const gross_price = std.fmt.parseFloat(f32, try reader.text()) catch 0.0;
+                        const net_price = gross_price - gross_price * 0.23;
+
+                        net_from_gross_price = net_price;
                     }
                 },
                 .element_end => {
                     if (std.mem.eql(u8, reader.elementNameNs().local, "FaWiersz")) {
-                        if (item.name.items.len != 0 and item.quantity != null and item.price != null) {
-                            try inventory_list.append(allocator, item);
+                        if (item.name.items.len != 0 and
+                            item.quantity != null and
+                            item.price != null or
+                            net_from_gross_price != 0.0)
+                        {
+                            if (item.price == null and net_from_gross_price != 0.0)
+                                item.price = net_from_gross_price;
+
+                            try items.append(allocator, item);
                             item = .{};
+                            net_from_gross_price = 0.0;
                         } else {
                             item.name.clearRetainingCapacity();
                             item.quantity = null;
                             item.unit = null;
                             item.price = null;
+                            net_from_gross_price = 0.0;
+                            const name_copy = try allocator.dupe(u8, entry.name);
+                            try skipped_files.append(allocator, name_copy);
+                            break;
                         }
                     }
                 },
@@ -276,7 +322,8 @@ fn save_inventory(path: []const u8) !void {
         month_day.day_index + 1,
         x,
     });
-    filepath = try std.Io.Dir.path.join(allocator, &.{ path, filename });
+    const filepath = try std.Io.Dir.path.join(allocator, &.{ path, filename });
+    defer allocator.free(filepath);
 
     var file = try std.Io.Dir.cwd().createFile(dvui.io, filepath, .{});
     defer file.close(dvui.io);
@@ -284,7 +331,7 @@ fn save_inventory(path: []const u8) !void {
     var file_writer = file.writer(dvui.io, &writer_buf);
     const w = &file_writer.interface;
 
-    for (inventory_list.items) |*item| {
+    for (items.items) |*item| {
         try w.writeByte('"');
         try w.writeAll(item.name.items);
         try w.writeByte('"');
