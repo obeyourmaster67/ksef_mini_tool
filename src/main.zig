@@ -153,14 +153,18 @@ fn frame() !void {
             dvui.label(@src(), "Zapisano", .{}, .{});
 
             {
-                var scroll = dvui.scrollArea(@src(), .{}, .{
-                    .expand = .horizontal,
-                    .background = false,
-                    .max_size_content = .{ .w = 10000, .h = 200 },
-                });
-                defer scroll.deinit();
-                for (skipped_files.items, 0..) |item, i| {
-                    dvui.label(@src(), "{s}", .{item}, .{ .id_extra = i });
+                if (skipped_files.items.len > 0) {
+                    dvui.label(@src(), "Pominęto pliki:", .{}, .{});
+
+                    var scroll = dvui.scrollArea(@src(), .{}, .{
+                        .expand = .horizontal,
+                        .background = false,
+                        .max_size_content = .{ .w = 10000, .h = 200 },
+                    });
+                    defer scroll.deinit();
+                    for (skipped_files.items, 0..) |item, i| {
+                        dvui.label(@src(), "{s}", .{item}, .{ .id_extra = i });
+                    }
                 }
             }
 
