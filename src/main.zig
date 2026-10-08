@@ -48,10 +48,6 @@ const Item = struct {
     quantity: ?u32 = null,
     unit: ?[16]u8 = null,
     price: ?f32 = null,
-
-    fn deinit(self: *Item, gpa: std.mem.Allocator) void {
-        self.name.deinit(gpa);
-    }
 };
 
 const is_debug = switch (builtin.mode) {
