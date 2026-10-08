@@ -8,7 +8,7 @@ pub const dvui_app: dvui.App = .{
         .options = .{
             .size = .{ .w = 800.0, .h = 600.0 },
             .min_size = .{ .w = 250.0, .h = 350.0 },
-            .title = "microinvKSEF",
+            .title = "ksef_mini_tool",
             .window_init_options = .{
                 .keybinds_zoom = true,
             },
@@ -64,6 +64,8 @@ const allocator: std.mem.Allocator = if (is_debug)
     debug_allocator.allocator()
 else
     std.heap.smp_allocator;
+var arena: std.heap.ArenaAllocator = .init(allocator);
+var arena_allocator: std.mem.Allocator = arena.allocator();
 var thread: std.Thread = undefined;
 var is_done: std.atomic.Value(bool) = .init(false);
 var state: AppState = .awaiting_read_path;
@@ -81,16 +83,15 @@ pub fn appFrame() !dvui.App.Result {
         );
         scaler.deinit();
 
-        frame() catch |e| {
+        return frame() catch |e| {
             err = e;
             state = .err;
+            return .ok;
         };
     }
-
-    return .ok;
 }
 
-fn frame() !void {
+fn frame() !dvui.App.Result {
     var center_box = dvui.box(
         @src(),
         .{ .dir = .vertical },
@@ -159,9 +160,10 @@ fn frame() !void {
                     var scroll = dvui.scrollArea(@src(), .{}, .{
                         .expand = .horizontal,
                         .background = false,
-                        .max_size_content = .{ .w = 10000, .h = 200 },
+                        .max_size_content = .{ .w = 10000, .h = 40 },
                     });
                     defer scroll.deinit();
+
                     for (skipped_files.items, 0..) |item, i| {
                         dvui.label(@src(), "{s}", .{item}, .{ .id_extra = i });
                     }
@@ -169,20 +171,20 @@ fn frame() !void {
             }
 
             if (dvui.button(@src(), "OK", .{}, .{})) {
-                for (items.items) |*it| it.name.deinit(allocator);
-                items.deinit(allocator);
-                for (skipped_files.items) |it| allocator.free(it);
-                skipped_files.deinit(allocator);
+                arena.deinit();
                 state = .awaiting_read_path;
             }
         },
         .err => {
+            arena.deinit();
             dvui.label(@src(), "Błąd", .{}, .{});
             dvui.label(@src(), "Uruchom ponownie plikacje\n({s})\n", .{@errorName(err)}, .{});
             if (dvui.button(@src(), "OK", .{}, .{}))
-                std.process.exit(1);
+                return .close;
         },
     }
+
+    return .ok;
 }
 
 fn inventory_job(dir: []const u8) void {
@@ -228,78 +230,88 @@ fn inventory(dir: []const u8) !void {
         const stdout = &stdout_writer.interface;
         try stdout.flush();
 
-        var item: Item = .{};
-        var net_from_gross_price: f32 = 0.0;
-
-        while (true) {
-            switch (try reader.read()) {
-                .eof => break,
-                .element_start => {
-                    if (std.mem.eql(u8, "P_7", reader.elementNameNs().local)) {
-                        const text = try switch (try reader.read()) {
-                            .text => try reader.text(),
-                            .element_end => "",
-                            else => error.MalformedXml,
-                        };
-
-                        item.name.clearRetainingCapacity();
-                        try item.name.appendSlice(allocator, text);
-                    } else if (std.mem.eql(u8, "P_8B", reader.elementNameNs().local)) {
-                        _ = try reader.read();
-                        item.quantity = @intFromFloat(std.fmt.parseFloat(f32, try reader.text()) catch 0.0);
-                    } else if (std.mem.eql(u8, "P_8A", reader.elementNameNs().local)) {
-                        const text = try switch (try reader.read()) {
-                            .text => try reader.text(),
-                            .element_end => "",
-                            else => error.MalformedXml,
-                        };
-
-                        item.unit = @splat(0);
-                        const len = @min(text.len, item.unit.?.len);
-                        @memcpy(item.unit.?[0..len], text[0..len]);
-                    } else if (std.mem.eql(u8, "P_9A", reader.elementNameNs().local)) {
-                        _ = try reader.read();
-                        item.price = std.fmt.parseFloat(f32, try reader.text()) catch 0.0;
-                    } else if (std.mem.eql(u8, "P_9B", reader.elementNameNs().local)) {
-                        _ = try reader.read();
-
-                        const gross_price = std.fmt.parseFloat(f32, try reader.text()) catch 0.0;
-                        const net_price = gross_price - gross_price * 0.23;
-
-                        net_from_gross_price = net_price;
-                    }
+        parse(reader) catch |e| {
+            switch (e) {
+                xml.Reader.ReadError.MalformedXml,
+                xml.Reader.ReadError.ReadFailed,
+                error.MissingElement,
+                => {
+                    try skipped_files.append(arena_allocator, try arena_allocator.dupe(u8, entry.name));
                 },
-                .element_end => {
-                    if (std.mem.eql(u8, reader.elementNameNs().local, "FaWiersz")) {
-                        if (item.name.items.len != 0 and
-                            item.quantity != null and
-                            item.price != null or
-                            net_from_gross_price != 0.0)
-                        {
-                            if (item.price == null and net_from_gross_price != 0.0)
-                                item.price = net_from_gross_price;
-
-                            try items.append(allocator, item);
-                            item = .{};
-                            net_from_gross_price = 0.0;
-                        } else {
-                            item.name.clearRetainingCapacity();
-                            item.quantity = null;
-                            item.unit = null;
-                            item.price = null;
-                            net_from_gross_price = 0.0;
-                            const name_copy = try allocator.dupe(u8, entry.name);
-                            try skipped_files.append(allocator, name_copy);
-                            break;
-                        }
-                    }
+                else => {
+                    return e;
                 },
-                else => {},
             }
-        }
+        };
     }
 
     is_done.store(true, .release);
+}
+
+fn parse(reader: *xml.Reader) !void {
+    var item: Item = .{};
+    defer item.name.deinit(arena_allocator);
+    var net_from_gross_price: f32 = 0.0;
+
+    while (true) {
+        switch (try reader.read()) {
+            .eof => break,
+            .element_start => {
+                if (std.mem.eql(u8, "P_7", reader.elementNameNs().local)) {
+                    const text = try switch (try reader.read()) {
+                        .text => try reader.text(),
+                        .element_end => "",
+                        else => error.MalformedXml,
+                    };
+
+                    item.name.clearRetainingCapacity();
+                    try item.name.appendSlice(arena_allocator, text);
+                } else if (std.mem.eql(u8, "P_8B", reader.elementNameNs().local)) {
+                    _ = try reader.read();
+                    item.quantity = @intFromFloat(std.fmt.parseFloat(f32, try reader.text()) catch 0.0);
+                } else if (std.mem.eql(u8, "P_8A", reader.elementNameNs().local)) {
+                    const text = try switch (try reader.read()) {
+                        .text => try reader.text(),
+                        .element_end => "",
+                        else => error.MalformedXml,
+                    };
+
+                    item.unit = @splat(0);
+                    const len = @min(text.len, item.unit.?.len);
+                    @memcpy(item.unit.?[0..len], text[0..len]);
+                } else if (std.mem.eql(u8, "P_9A", reader.elementNameNs().local)) {
+                    _ = try reader.read();
+                    item.price = std.fmt.parseFloat(f32, try reader.text()) catch 0.0;
+                } else if (std.mem.eql(u8, "P_9B", reader.elementNameNs().local)) {
+                    _ = try reader.read();
+
+                    const gross_price = std.fmt.parseFloat(f32, try reader.text()) catch 0.0;
+                    const net_price = gross_price - gross_price * 0.23;
+
+                    net_from_gross_price = net_price;
+                }
+            },
+            .element_end => {
+                if (std.mem.eql(u8, reader.elementNameNs().local, "FaWiersz")) {
+                    if (item.name.items.len != 0 and
+                        item.quantity != null and
+                        item.price != null or
+                        net_from_gross_price != 0.0)
+                    {
+                        if (item.price == null and net_from_gross_price != 0.0)
+                            item.price = net_from_gross_price;
+
+                        try items.append(arena_allocator, item);
+                        item = .{};
+                        net_from_gross_price = 0.0;
+                    } else {
+                        return error.MissingElement;
+                    }
+                }
+            },
+            else => {},
+        }
+    }
 }
 
 fn save_inventory_job(path: []const u8) void {
