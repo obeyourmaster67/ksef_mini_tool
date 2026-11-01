@@ -231,6 +231,7 @@ fn inventory(dir: []const u8) !void {
                 xml.Reader.ReadError.MalformedXml,
                 xml.Reader.ReadError.ReadFailed,
                 error.MissingElement,
+                error.EmptyFile,
                 => {
                     try skipped_files.append(arena_allocator, try arena_allocator.dupe(u8, entry.name));
                 },
@@ -257,7 +258,7 @@ fn parse(reader: *xml.Reader) !void {
                     const text = try switch (try reader.read()) {
                         .text => try reader.text(),
                         .element_end => "",
-                        else => error.MalformedXml,
+                        else => xml.Reader.ReadError.MalformedXml,
                     };
 
                     item.name.clearRetainingCapacity();
@@ -269,7 +270,7 @@ fn parse(reader: *xml.Reader) !void {
                     const text = try switch (try reader.read()) {
                         .text => try reader.text(),
                         .element_end => "",
-                        else => error.MalformedXml,
+                        else => xml.Reader.ReadError.MalformedXml,
                     };
 
                     item.unit = @splat(0);
@@ -308,6 +309,9 @@ fn parse(reader: *xml.Reader) !void {
             else => {},
         }
     }
+
+    if (items.items.len == 0)
+        return error.EmptyFile;
 }
 
 fn save_inventory_job(path: []const u8) void {
